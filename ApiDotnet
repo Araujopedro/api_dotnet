@@ -1,0 +1,137 @@
+# Pipeline: OdontoPrev .NET com Oracle
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Variáveis do projeto
+  buildConfiguration: 'Release'
+  dotnetVersion: '8.0.x'
+  # Variáveis de infraestrutura - SUBSTITUIR PELOS SEUS DADOS
+  location: 'brazilsouth'
+  resourceGroup: 'rg-odontoprev-[SEU-RM]'
+  appServicePlan: 'plan-odontoprev-[SEU-RM]'
+  appName: 'app-odontoprev-[SEU-RM]'
+  # Variáveis de conexão Oracle - SUBSTITUIR PELA SUA CONNECTION STRING
+  oracleConnectionString: 'Data Source=//oracle.fiap.com.br:1521/orcl;User Id=[SEU-RM];Password=[SUA-SENHA];'
+
+stages:
+# ESTÁGIO 1: Criar Infraestrutura Azure
+- stage: CriarInfraestrutura
+  displayName: 'Criar Infraestrutura'
+  jobs:
+  - job: InfraJob
+    steps:
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '[NOME-DA-SUA-CONEXAO-AZURE]'  # Nome exato da sua conexão de serviço
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Criar Grupo de Recursos
+          echo "Criando grupo de recursos $(resourceGroup)..."
+          az group create --name $(resourceGroup) --location $(location)
+          
+          # Criar Plano do App Service Linux
+          echo "Criando plano de App Service $(appServicePlan)..."
+          az appservice plan create \
+            --name $(appServicePlan) \
+            --resource-group $(resourceGroup) \
+            --sku F1 \
+            --is-linux
+
+# ESTÁGIO 2: Build da Aplicação
+- stage: BuildApp
+  displayName: 'Build da Aplicação'
+  dependsOn: CriarInfraestrutura
+  jobs:
+  - job: BuildJob
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        packageType: 'sdk'
+        version: '$(dotnetVersion)'
+    
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+    
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+    
+    - task: DotNetCoreCLI@2
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory) --no-build'
+        zipAfterPublish: true
+    
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'odontoprev-api'
+
+# ESTÁGIO 3: Deploy para o App Service
+- stage: DeployApp
+  displayName: 'Deploy da Aplicação'
+  dependsOn: BuildApp
+  jobs:
+  - job: DeployJob
+    steps:
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'odontoprev-api'
+        downloadPath: '$(Pipeline.Workspace)'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '[NOME-DA-SUA-CONEXAO-AZURE]'  # Nome exato da sua conexão de serviço
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Criar App Service
+          echo "Criando App Service $(appName)..."
+          az webapp create \
+            --name $(appName) \
+            --resource-group $(resourceGroup) \
+            --plan $(appServicePlan) \
+            --runtime "DOTNETCORE|8.0"
+          
+          # Configurar Connection String do Oracle
+          echo "Configurando Oracle Connection String..."
+          az webapp config appsettings set \
+            --name $(appName) \
+            --resource-group $(resourceGroup) \
+            --settings \
+            ConnectionStrings__OracleConnection="$(oracleConnectionString)" \
+            ASPNETCORE_ENVIRONMENT="Development" \
+            DOTNET_USE_POLLING_FILE_WATCHER="1" \
+            WEBSITE_NODE_DEFAULT_VERSION="~18"
+          
+          echo "Variáveis de ambiente configuradas com sucesso."
+    
+    - task: AzureWebApp@1
+      inputs:
+        azureSubscription: '[NOME-DA-SUA-CONEXAO-AZURE]'  # Nome exato da sua conexão de serviço
+        appType: 'webAppLinux'
+        appName: '$(appName)'
+        package: '$(Pipeline.Workspace)/odontoprev-api/*.zip'
+        deploymentMethod: 'auto'
+        
+    - script: |
+        echo "Deploy concluído com sucesso!"
+        echo "A aplicação está disponível em: https://$(appName).azurewebsites.net"
+        echo "Documentação Swagger: https://$(appName).azurewebsites.net/swagger"
+        echo "Lembre-se de acessar a documentação da API para testar os endpoints disponíveis."
+      displayName: 'Informar URL da aplicação'
